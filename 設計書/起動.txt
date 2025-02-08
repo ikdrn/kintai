@@ -1,0 +1,2 @@
+cd C:\Users\ikere\OneDrive\デスクトップ\プログラミング\kintai
+docker-compose up --build

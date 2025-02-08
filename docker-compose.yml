@@ -1,0 +1,23 @@
+version: '3'
+services:
+  backend:
+    build: ./kintai_back
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - ./kintai_back:/app
+    ports:
+      - "8000:8000"
+    environment:
+      - kintaiDB_HOST=35.187.220.47
+      - kintaiDB_PORT=3306
+      - kintaiDB_USER=root
+      - kintaiDB_PASSWORD=oG-VtEz2#"rHEq9*
+      - kintaiDB_NAME=testMySQL
+
+  frontend:
+    build: ./kintai_front
+    command: npm run serve
+    volumes:
+      - ./kintai_front:/app
+    ports:
+      - "8080:8080"
