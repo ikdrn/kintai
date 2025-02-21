@@ -1,0 +1,13 @@
+##6テーブル定義 
+CREATE TABLE employees (
+EMPLID VARCHAR(5) PRIMARY KEY, --社員番号
+EMPLNM VARCHAR(100) --社員名前
+);
+
+CREATE TABLE attendance (
+ATTEID VARCHAR(5), --社員番号
+ATTEDT date, --日付
+ATTEST VARCHAR(4), --就業時間
+ATTEET VARCHAR(4), --終了時間
+FOREIGN KEY (ATTEID) REFERENCES employees(EMPLID)
+);
