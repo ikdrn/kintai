@@ -1,50 +1,111 @@
 # ファイル: kintai_back/attendance_system/settings.py
 import os
-from pathlib import Path
+import sys
+import logging
+from urllib.parse import urlparse, parse_qs
+
 from django.core.exceptions import ImproperlyConfigured
-from dotenv import load_dotenv  # python-dotenv を利用する場合
+from django.db import connections
+from django.db.utils import OperationalError
 
-# プロジェクトのルートディレクトリ
-BASE_DIR = Path(__file__).resolve().parent.parent
+# Configure logging
+logger = logging.getLogger(__name__)
 
-# .env ファイルが存在する場合はロードする（任意）
-load_dotenv(BASE_DIR / '.env')
+# -------------------------------------------------------------------
+# Original GCP MySQL configuration
+# (Keep this unchanged even if it expires; fallback happens at startup)
+# -------------------------------------------------------------------
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.mysql',
+        'HOST': os.environ.get('GCP_MYSQL_HOST', 'your_gcp_mysql_host'),
+        'USER': os.environ.get('GCP_MYSQL_USER', 'your_mysql_username'),
+        'PASSWORD': os.environ.get('GCP_MYSQL_PASSWORD', 'your_mysql_password'),
+        'NAME': os.environ.get('GCP_MYSQL_DB', 'your_mysql_database'),
+        'PORT': os.environ.get('GCP_MYSQL_PORT', '3306'),
+        # Additional options can be added here if needed.
+    }
+}
 
-def get_env_variable(var_name, default=None, required=False):
+# -------------------------------------------------------------------
+# Fallback to Neon PostgreSQL if the primary DB (GCP) has expired.
+# A NEON_CONNECT environment variable is assumed available and set, e.g.:
+# postgresql://neondb_owner:npg_PDYZ6yxk7ehQ@ep-flat-bar-a1nmau4p-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require
+# -------------------------------------------------------------------
+
+def parse_neon_dsn(dsn: str) -> dict:
     """
-    環境変数を取得するヘルパー関数
-    - var_name: 環境変数の名前
-    - default: 環境変数が設定されていない場合のデフォルト値
-    - required: True の場合、値がなければエラーを発生させる
+    Parse the DSN from NEON_CONNECT and return a Django DATABASE config.
     """
-    value = os.environ.get(var_name, default)
-    if required and value is None:
-        raise ImproperlyConfigured(f"環境変数 {var_name} が設定されていません。")
-    return value
+    result = urlparse(dsn)
+    if result.scheme not in ('postgres', 'postgresql'):
+        raise ImproperlyConfigured("NEON_CONNECT must be a PostgreSQL DSN")
+    # Extract query parameters (for sslmode, etc.)
+    query = parse_qs(result.query)
+    # Django expects options with key sslmode, not as part of a query string.
+    options = {}
+    if 'sslmode' in query:
+        options['sslmode'] = query['sslmode'][0]
+    
+    return {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': result.path.lstrip('/'),
+        'USER': result.username,
+        'PASSWORD': result.password,
+        'HOST': result.hostname,
+        'PORT': result.port or '5432',
+        'OPTIONS': options,
+    }
 
-# SECRET_KEY は必須の環境変数から取得
-SECRET_KEY = get_env_variable('DJANGO_SECRET_KEY', required=True)
+def try_connect_and_fallback():
+    """
+    Try to ensure connection to the configured default database.
+    Fallback to Neon PostgreSQL if an OperationalError containing the error message '期限切れ'
+    is encountered.
+    """
+    try:
+        # Attempt to get a connection; this will trigger actual connection attempts
+        connection = connections['default']
+        connection.ensure_connection()
+        logger.info("Successfully connected to GCP MySQL.")
+    except OperationalError as e:
+        error_message = str(e)
+        if "期限切れ" in error_message:
+            neon_dsn = os.environ.get("NEON_CONNECT")
+            if neon_dsn:
+                logger.warning("GCP MySQL connection error (期限切れ). Falling back to Neon PostgreSQL.")
+                DATABASES['default'] = parse_neon_dsn(neon_dsn)
+            else:
+                logger.error("NEON_CONNECT environment variable not set. Cannot fallback to Neon PostgreSQL.")
+        else:
+            # For errors that are not the 'expired' one, re-raise the exception
+            raise e
 
-# DEBUG モードは環境変数で設定（文字列 'True' の場合 True にする）
-DEBUG = get_env_variable('DJANGO_DEBUG', default='False') == 'True'
+# Only attempt the connection when not running management commands that shouldn't connect to DB.
+if 'runserver' in sys.argv or 'gunicorn' in sys.argv or 'uwsgi' in sys.argv:
+    try_connect_and_fallback()
 
-# ALLOWED_HOSTS はカンマ区切りの文字列からリストを生成
-ALLOWED_HOSTS = get_env_variable('DJANGO_ALLOWED_HOSTS', default='localhost').split(',')
+# -------------------------------------------------------------------
+# Other Django settings below...
+# (Include your INSTALLED_APPS, TEMPLATES, MIDDLEWARE, etc.)
+# -------------------------------------------------------------------
 
-# Application definition
+DEBUG = os.environ.get('DEBUG', 'False') == 'True'
+
+ALLOWED_HOSTS = ['*']  # Adjust as needed
+
 INSTALLED_APPS = [
+    # Your apps...
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'attendance_app',  # 勤怠アプリ
-    'corsheaders',     # CORS 対策
+    # ...
 ]
 
 MIDDLEWARE = [
-    'corsheaders.middleware.CorsMiddleware',  # CORS ミドルウェアは上位に配置
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -54,12 +115,12 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-ROOT_URLCONF = 'attendance_system.urls'
+ROOT_URLCONF = 'kintai.urls'
 
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [BASE_DIR / 'templates'],  # テンプレートディレクトリ
+        'DIRS': [os.path.join(os.path.dirname(__file__), 'templates')],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -72,19 +133,7 @@ TEMPLATES = [
     },
 ]
 
-WSGI_APPLICATION = 'attendance_system.wsgi.application'
-
-# Database 設定：環境変数から取得し、必須のものは required=True に設定
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.mysql',
-        'NAME': get_env_variable('KINTAI_DB_NAME', required=True),
-        'USER': get_env_variable('KINTAI_DB_USER', required=True),
-        'PASSWORD': get_env_variable('KINTAI_DB_PASSWORD', required=True),
-        'HOST': get_env_variable('KINTAI_DB_HOST', default='localhost'),
-        'PORT': get_env_variable('KINTAI_DB_PORT', default='3306'),
-    }
-}
+WSGI_APPLICATION = 'kintai.wsgi.application'
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
@@ -103,9 +152,10 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 # Internationalization
-LANGUAGE_CODE = 'ja'
-TIME_ZONE = 'Asia/Tokyo'
+LANGUAGE_CODE = 'en-us'
+TIME_ZONE = 'UTC'
 USE_I18N = True
+USE_L10N = True
 USE_TZ = True
 
 # Static files (CSS, JavaScript, Images)
